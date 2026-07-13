@@ -178,7 +178,7 @@ def _parse_with_monopoly(
     transactions = [
         _transaction_from_mapping(row, bank_name, filename, big_item_threshold)
         for row in transformed
-        if row.get("date") and row.get("description") and row.get("amount") is not None
+        if _row_has_values(row, "date", "description", "amount")
     ]
     return ParseResult(filename, bank_name, transactions, warnings, safety_ok, "monopoly-core")
 
@@ -225,23 +225,24 @@ def _parse_with_fallback(
     transactions = [
         _transaction_from_mapping(row, bank, filename, big_item_threshold)
         for row in rows
-        if row.get("description") and row.get("amount") is not None
+        if _row_has_values(row, "description", "amount")
     ]
     return ParseResult(filename, bank, transactions, warnings, None, "pypdf-fallback")
 
 
 def _transaction_from_mapping(
-    row: dict[str, Any],
+    row: Any,
     bank: str,
     source_file: str,
     big_item_threshold: float,
 ) -> Transaction:
-    amount = float(row["amount"])
-    category, confidence = categorize(row.get("description", ""), amount)
+    amount = float(_row_value(row, "amount", 0))
+    description = str(_row_value(row, "description", "")).strip()
+    category, confidence = categorize(description, amount)
     flag = "Big item" if amount > 0 and abs(amount) >= big_item_threshold else ""
     return Transaction(
-        date=row["date"],
-        description=str(row["description"]).strip(),
+        date=_row_value(row, "date"),
+        description=description,
         amount=round(amount, 2),
         bank=bank,
         source_file=source_file,
@@ -249,6 +250,20 @@ def _transaction_from_mapping(
         confidence=confidence,
         flag=flag,
     )
+
+
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    if hasattr(row, key):
+        return getattr(row, key)
+    if hasattr(row, "model_dump"):
+        return row.model_dump().get(key, default)
+    return default
+
+
+def _row_has_values(row: Any, *keys: str) -> bool:
+    return all(_row_value(row, key) is not None and _row_value(row, key) != "" for key in keys)
 
 
 def categorize(description: str, amount: float = 0) -> tuple[str, str]:
