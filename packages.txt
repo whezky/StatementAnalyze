@@ -1,0 +1,9 @@
+# Keep the default Streamlit Cloud deploy lightweight.
+# The app uses pypdf fallback by default.
+#
+# For a full StatementSensei/monopoly-core deployment on a host that supports
+# system packages, use requirements-full.txt and add:
+# build-essential
+# libpoppler-cpp-dev
+# pkg-config
+# ocrmypdf
