@@ -1,6 +1,6 @@
 # Card Statement Analyzer
 
-This version uses a StatementSensei-style Python parsing architecture instead of the older browser-only PDF parser.
+This version uses a  Python parsing architecture instead of the older browser-only PDF parser.
 
 ## Run Locally
 
