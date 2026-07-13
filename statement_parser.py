@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import base64
+import json
+import os
 import re
+import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from datetime import date
 from io import BytesIO
@@ -86,13 +91,13 @@ def parse_pdf_statement(
 ) -> ParseResult:
     """Parse a statement using monopoly-core when available, with a local fallback."""
     try:
-        return _parse_with_monopoly(filename, file_bytes, password, big_item_threshold, allow_ocr)
-    except ImportError as exc:
+        return _parse_with_monopoly_isolated(filename, file_bytes, password, big_item_threshold, allow_ocr)
+    except Exception as exc:
         result = _parse_with_fallback(filename, file_bytes, password, big_item_threshold)
         result.warnings.insert(
             0,
-            "monopoly-core is not installed in this environment; used fallback parser. "
-            "Install requirements.txt for StatementSensei-style bank detection.",
+            "monopoly-core failed in the isolated parser; used fallback parser. "
+            "The fallback handles text-based PDFs but may be less bank-aware.",
         )
         result.warnings.append(str(exc))
         return result
@@ -109,6 +114,87 @@ def results_to_dataframe(results: list[ParseResult]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
     return df.sort_values(["date", "source_file", "description"], na_position="last").reset_index(drop=True)
+
+
+def _parse_with_monopoly_isolated(
+    filename: str,
+    file_bytes: bytes,
+    password: str | None,
+    big_item_threshold: float,
+    allow_ocr: bool,
+) -> ParseResult:
+    if os.environ.get("STATEMENT_ANALYZER_MONOPOLY_CHILD") == "1":
+        return _parse_with_monopoly(filename, file_bytes, password, big_item_threshold, allow_ocr)
+
+    payload = {
+        "filename": filename,
+        "file_bytes": base64.b64encode(file_bytes).decode("ascii"),
+        "password": password,
+        "big_item_threshold": big_item_threshold,
+        "allow_ocr": allow_ocr,
+    }
+    child_code = """
+import base64
+import json
+import os
+import sys
+
+os.environ["STATEMENT_ANALYZER_MONOPOLY_CHILD"] = "1"
+from statement_parser import _parse_result_to_payload, _parse_with_monopoly
+
+payload = json.loads(sys.stdin.read())
+result = _parse_with_monopoly(
+    payload["filename"],
+    base64.b64decode(payload["file_bytes"]),
+    payload.get("password"),
+    payload["big_item_threshold"],
+    payload["allow_ocr"],
+)
+print(json.dumps(_parse_result_to_payload(result), default=str))
+"""
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-c", child_code],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        timeout=90,
+        cwd=os.getcwd(),
+        env=env,
+        check=False,
+    )
+    if completed.returncode != 0:
+        details = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
+        raise RuntimeError(f"monopoly-core parser failed: {details}")
+
+    output_lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    if not output_lines:
+        raise RuntimeError("monopoly-core parser returned no output")
+    return _parse_result_from_payload(json.loads(output_lines[-1]))
+
+
+def _parse_result_to_payload(result: ParseResult) -> dict[str, Any]:
+    return {
+        "filename": result.filename,
+        "bank": result.bank,
+        "transactions": [asdict(tx) for tx in result.transactions],
+        "warnings": result.warnings,
+        "safety_ok": result.safety_ok,
+        "parser": result.parser,
+    }
+
+
+def _parse_result_from_payload(payload: dict[str, Any]) -> ParseResult:
+    transactions = [Transaction(**tx) for tx in payload.get("transactions", [])]
+    return ParseResult(
+        filename=payload.get("filename", ""),
+        bank=payload.get("bank", "Unknown"),
+        transactions=transactions,
+        warnings=payload.get("warnings", []),
+        safety_ok=payload.get("safety_ok"),
+        parser=payload.get("parser", "monopoly-core"),
+    )
 
 
 def _parse_with_monopoly(
